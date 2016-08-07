@@ -40,7 +40,7 @@ const (
 // an operation
 type OperationID string
 
-func (c client) GetOperationStatus(operationID OperationID) (GetOperationStatusResponse, error) {
+func (c *client) GetOperationStatus(operationID OperationID) (GetOperationStatusResponse, error) {
 	operation := GetOperationStatusResponse{}
 	if operationID == "" {
 		return operation, fmt.Errorf(errParamNotSpecified, "operationID")
@@ -56,7 +56,7 @@ func (c client) GetOperationStatus(operationID OperationID) (GetOperationStatusR
 	return operation, err
 }
 
-func (c client) WaitForOperation(operationID OperationID, cancel chan struct{}) error {
+func (c *client) WaitForOperation(operationID OperationID, cancel chan struct{}) error {
 	for {
 		done, err := c.checkOperationStatus(operationID)
 		if err != nil || done {
@@ -70,7 +70,7 @@ func (c client) WaitForOperation(operationID OperationID, cancel chan struct{}) 
 	}
 }
 
-func (c client) checkOperationStatus(id OperationID) (done bool, err error) {
+func (c *client) checkOperationStatus(id OperationID) (done bool, err error) {
 	op, err := c.GetOperationStatus(id)
 	if err != nil {
 		return false, fmt.Errorf("Failed to get operation status '%s': %v", id, err)

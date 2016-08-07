@@ -3,9 +3,8 @@ package management
 import (
 	"bytes"
 	"fmt"
-
-	"github.com/Azure/azure-sdk-for-go/core/http"
-	"github.com/Azure/azure-sdk-for-go/core/tls"
+	"io"
+	"net/http"
 )
 
 const (
@@ -16,7 +15,7 @@ const (
 	defaultContentHeaderValue = "application/xml"
 )
 
-func (client client) SendAzureGetRequest(url string) ([]byte, error) {
+func (client *client) SendAzureGetRequest(url string) ([]byte, error) {
 	resp, err := client.sendAzureRequest("GET", url, "", nil)
 	if err != nil {
 		return nil, err
@@ -24,11 +23,11 @@ func (client client) SendAzureGetRequest(url string) ([]byte, error) {
 	return getResponseBody(resp)
 }
 
-func (client client) SendAzurePostRequest(url string, data []byte) (OperationID, error) {
+func (client *client) SendAzurePostRequest(url string, data []byte) (OperationID, error) {
 	return client.doAzureOperation("POST", url, "", data)
 }
 
-func (client client) SendAzurePostRequestWithReturnedResponse(url string, data []byte) ([]byte, error) {
+func (client *client) SendAzurePostRequestWithReturnedResponse(url string, data []byte) ([]byte, error) {
 	resp, err := client.sendAzureRequest("POST", url, "", data)
 	if err != nil {
 		return nil, err
@@ -37,15 +36,15 @@ func (client client) SendAzurePostRequestWithReturnedResponse(url string, data [
 	return getResponseBody(resp)
 }
 
-func (client client) SendAzurePutRequest(url, contentType string, data []byte) (OperationID, error) {
+func (client *client) SendAzurePutRequest(url, contentType string, data []byte) (OperationID, error) {
 	return client.doAzureOperation("PUT", url, contentType, data)
 }
 
-func (client client) SendAzureDeleteRequest(url string) (OperationID, error) {
+func (client *client) SendAzureDeleteRequest(url string) (OperationID, error) {
 	return client.doAzureOperation("DELETE", url, "", nil)
 }
 
-func (client client) doAzureOperation(method, url, contentType string, data []byte) (OperationID, error) {
+func (client *client) doAzureOperation(method, url, contentType string, data []byte) (OperationID, error) {
 	response, err := client.sendAzureRequest(method, url, contentType, data)
 	if err != nil {
 		return "", err
@@ -63,7 +62,7 @@ func getOperationID(response *http.Response) (OperationID, error) {
 
 // sendAzureRequest constructs an HTTP client for the request, sends it to the
 // management API and returns the response or an error.
-func (client client) sendAzureRequest(method, url, contentType string, data []byte) (*http.Response, error) {
+func (client *client) sendAzureRequest(method, url, contentType string, data []byte) (*http.Response, error) {
 	if method == "" {
 		return nil, fmt.Errorf(errParamNotSpecified, "method")
 	}
@@ -71,9 +70,7 @@ func (client client) sendAzureRequest(method, url, contentType string, data []by
 		return nil, fmt.Errorf(errParamNotSpecified, "url")
 	}
 
-	httpClient := client.createHTTPClient()
-
-	response, err := client.sendRequest(httpClient, url, method, contentType, data, 5)
+	response, err := client.sendRequest(url, method, contentType, data, 5)
 	if err != nil {
 		return nil, err
 	}
@@ -81,44 +78,26 @@ func (client client) sendAzureRequest(method, url, contentType string, data []by
 	return response, nil
 }
 
-// createHTTPClient creates an HTTP Client configured with the key pair for
-// the subscription for this client.
-func (client client) createHTTPClient() *http.Client {
-	cert, _ := tls.X509KeyPair(client.publishSettings.SubscriptionCert, client.publishSettings.SubscriptionKey)
-
-	ssl := &tls.Config{}
-	ssl.Certificates = []tls.Certificate{cert}
-
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			TLSClientConfig: ssl,
-		},
-	}
-
-	return httpClient
-}
-
 // sendRequest sends a request to the Azure management API using the given
 // HTTP client and parameters. It returns the response from the call or an
 // error.
-func (client client) sendRequest(httpClient *http.Client, url, requestType, contentType string, data []byte, numberOfRetries int) (*http.Response, error) {
+func (c *client) sendRequest(url, requestType, contentType string, data []byte, numberOfRetries int) (*http.Response, error) {
 
-	absURI := client.createAzureRequestURI(url)
+	absURI := c.createAzureRequestURI(url)
 
 	for {
-		request, reqErr := client.createAzureRequest(absURI, requestType, contentType, data)
+		request, reqErr := c.createAzureRequest(absURI, requestType, contentType, data)
 		if reqErr != nil {
 			return nil, reqErr
 		}
 
-		response, err := httpClient.Do(request)
+		response, err := c.client.Do(request)
 		if err != nil {
 			if numberOfRetries == 0 {
 				return nil, err
 			}
 
-			return client.sendRequest(httpClient, url, requestType, contentType, data, numberOfRetries-1)
+			return c.sendRequest(httpClient, url, requestType, contentType, data, numberOfRetries-1)
 		}
 		if response.StatusCode == http.StatusTemporaryRedirect {
 			// ASM's way of moving traffic around, see https://msdn.microsoft.com/en-us/library/azure/ee460801.aspx
@@ -143,7 +122,7 @@ func (client client) sendRequest(httpClient *http.Client, url, requestType, cont
 					return nil, azureErr
 				}
 
-				return client.sendRequest(httpClient, url, requestType, contentType, data, numberOfRetries-1)
+				return c.sendRequest(url, requestType, contentType, data, numberOfRetries-1)
 			}
 		}
 
@@ -153,23 +132,20 @@ func (client client) sendRequest(httpClient *http.Client, url, requestType, cont
 
 // createAzureRequestURI constructs the request uri using the management API endpoint and
 // subscription ID associated with the client.
-func (client client) createAzureRequestURI(url string) string {
+func (client *client) createAzureRequestURI(url string) string {
 	return fmt.Sprintf("%s/%s/%s", client.config.ManagementURL, client.publishSettings.SubscriptionID, url)
 }
 
 // createAzureRequest packages up the request with the correct set of headers and returns
 // the request object or an error.
-func (client client) createAzureRequest(url string, requestType string, contentType string, data []byte) (*http.Request, error) {
-	var request *http.Request
-	var err error
+func (client *client) createAzureRequest(url string, requestType string, contentType string, data []byte) (*http.Request, error) {
+	var body io.Reader
 
-	if data != nil {
-		body := bytes.NewBuffer(data)
-		request, err = http.NewRequest(requestType, url, body)
-	} else {
-		request, err = http.NewRequest(requestType, url, nil)
+	if len(data) != 0 {
+		body = bytes.NewReader(data)
 	}
 
+	request, err := http.NewRequest(requestType, url, body)
 	if err != nil {
 		return nil, err
 	}

@@ -3,7 +3,9 @@
 package management
 
 import (
+	"crypto/tls"
 	"errors"
+	"net/http"
 	"time"
 )
 
@@ -21,6 +23,7 @@ const (
 type client struct {
 	publishSettings publishSettings
 	config          ClientConfig
+	client          *http.Client
 }
 
 // Client is the base Azure Service Management API client instance that
@@ -66,17 +69,60 @@ type Client interface {
 	WaitForOperation(operationID OperationID, cancel chan struct{}) error
 }
 
+// CertInjecter if implemented by (*http.Client).Transport is called
+// when create new Client value.
+type CertInjecter struct {
+	InjectCert (*tls.Certificate)
+}
+
 // ClientConfig provides a configuration for use by a Client.
 type ClientConfig struct {
-	ManagementURL         string
+	// ManagementURL specifies the endpoint URL to use
+	// when sending HTTP requests.
+	//
+	// If empty, the DefaultAzureManagementURL is used.
+	ManagementURL string
+
+	// OperationPollInterval specifies fixed interval
+	// in which a resource is polled for its status.
+	//
+	// If 0, the DefaultOperationPollInterval is used.
 	OperationPollInterval time.Duration
-	UserAgent             string
-	APIVersion            string
+
+	// UserAgent specified the user agent string to use
+	// when sending HTTP requests.
+	//
+	// If empty, the DefaultUserAgent is used.
+	UserAgent string
+
+	// APIVersion specifies API version to use.
+	//
+	// If empty, the DefaultAPIVersion is used.
+	APIVersion string
+
+	// Client is used to send HTTP requests.
+	//
+	// If nil, new HTTP client is created internally. The newly
+	// created HTTP client has not timeouts set.
+	// If non-nil, the Client.Transport is modified to use
+	// TLS certificate read from publishsettings file.
+	//
+	// The certificate is injected by:
+	//
+	//   * modifying Transport.TLSClientConfig field if
+	//     Transport is of *http.Transport type
+	//
+	//   * calling Transport.InjectCert if Transport
+	//     implements the CertInjecter interface
+	//
+	Client *http.Client
 }
 
 // NewAnonymousClient creates a new azure.Client with no credentials set.
 func NewAnonymousClient() Client {
-	return client{}
+	return &client{
+		client: http.DefaultClient,
+	}
 }
 
 // DefaultConfig returns the default client configuration used to construct
@@ -103,14 +149,12 @@ func NewClientFromConfig(subscriptionID string, managementCert []byte, config Cl
 }
 
 func makeClient(subscriptionID string, managementCert []byte, config ClientConfig) (Client, error) {
-	var c client
-
 	if subscriptionID == "" {
-		return c, errors.New("azure: subscription ID required")
+		return nil, errors.New("azure: subscription ID required")
 	}
 
 	if len(managementCert) == 0 {
-		return c, errors.New("azure: management certificate required")
+		return nil, errors.New("azure: management certificate required")
 	}
 
 	publishSettings := publishSettings{
@@ -122,17 +166,42 @@ func makeClient(subscriptionID string, managementCert []byte, config ClientConfi
 	// Validate client configuration
 	switch {
 	case config.ManagementURL == "":
-		return c, errors.New("azure: base URL required")
+		return nil, errors.New("azure: base URL required")
 	case config.OperationPollInterval <= 0:
-		return c, errors.New("azure: operation polling interval must be a positive duration")
+		return nil, errors.New("azure: operation polling interval must be a positive duration")
 	case config.APIVersion == "":
-		return c, errors.New("azure: client configuration must specify an API version")
+		return nil, errors.New("azure: client configuration must specify an API version")
 	case config.UserAgent == "":
 		config.UserAgent = DefaultUserAgent
 	}
 
-	return client{
+	cert, err := tls.X509KeyPair(publishSettings.SubscriptionCert, publishSettings.SubscriptionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	c := config.Client
+
+	if c == nil {
+		c = &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+			},
+		}
+	}
+
+	switch t := c.Transport.(type) {
+	case *http.Transport:
+		t.TLSClientConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+	case http.Flusher:
+		// t.InjectCert(&cert)
+	}
+
+	return &client{
 		publishSettings: publishSettings,
 		config:          config,
+		client:          c,
 	}, nil
 }
